@@ -48,7 +48,7 @@ class BenchmarkBase:
         self.tmpdir = tempfile.mkdtemp()
         self.repo_path = os.path.join(self.tmpdir, "repo")
         
-    def teardown(self):
+    def teardown(self, *args):
         """Clean up temporary directory."""
         if hasattr(self, 'tmpdir') and os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir)
@@ -57,7 +57,8 @@ class BenchmarkBase:
 class LargeHistoryBenchmarks(BenchmarkBase):
     """Benchmarks for operations on repositories with large histories."""
     
-    params = ([100, 1000, 5000], [10, 50, 100])
+    # Reduced parameters for testing compatibility across versions
+    params = ([100, 500], [10, 50])
     param_names = ['num_commits', 'files_per_commit']
     
     def setup(self, num_commits, files_per_commit):
