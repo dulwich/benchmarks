@@ -63,6 +63,7 @@ class LargeHistoryBenchmarks(BenchmarkBase):
     def setup(self, num_commits, files_per_commit):
         """Create repository with large history."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
         self.num_commits = num_commits
         self.files_per_commit = files_per_commit
