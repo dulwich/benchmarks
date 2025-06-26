@@ -82,16 +82,42 @@ class LargeHistoryBenchmarks(BenchmarkBase):
                     content = ''.join(random.choices(string.ascii_letters + string.digits, k=1000))
                     f.write(f"Commit {i} modification {j}\n{content}\n")
                     
-            # Stage all changes
-            self.repo.stage(['file*.txt'])
+            # Stage all changes (handle API compatibility)
+            try:
+                # Get all file*.txt files
+                files_to_stage = [f'file{j}.txt' for j in range(files_per_commit)]
+                self.repo.stage(files_to_stage)
+            except AttributeError:
+                # Older versions don't have stage method
+                # Add files to index manually
+                from dulwich.index import index_entry_from_stat
+                index = self.repo.open_index()
+                for j in range(files_per_commit):
+                    filename = f'file{j}.txt'
+                    file_path = os.path.join(self.repo_path, filename)
+                    st = os.lstat(file_path)
+                    blob = Blob.from_string(f"Content for file {j} in commit {i}\n".encode())
+                    self.repo.object_store.add_object(blob)
+                    index[filename.encode()] = index_entry_from_stat(st, blob.id, 0)
+                index.write()
             
-            # Create commit
-            commit_id = self.repo.do_commit(
-                f"Commit {i}".encode(),
-                committer=b"Test User <test@example.com>",
-                author=b"Test User <test@example.com>",
-                parent_commits=[parent] if parent else []
-            )
+            # Create commit (handle API compatibility)
+            try:
+                # Try new API first (parent_commits)
+                commit_id = self.repo.do_commit(
+                    f"Commit {i}".encode(),
+                    committer=b"Test User <test@example.com>",
+                    author=b"Test User <test@example.com>",
+                    parent_commits=[parent] if parent else []
+                )
+            except TypeError:
+                # Fall back to old API (parents)
+                commit_id = self.repo.do_commit(
+                    f"Commit {i}".encode(),
+                    committer=b"Test User <test@example.com>",
+                    author=b"Test User <test@example.com>",
+                    parents=[parent] if parent else []
+                )
             self.commits.append(commit_id)
             parent = commit_id
             
