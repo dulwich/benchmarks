@@ -111,12 +111,14 @@ class LargeHistoryBenchmarks(BenchmarkBase):
                     parent_commits=[parent] if parent else []
                 )
             except TypeError:
-                # Fall back to old API (parents)
+                # Fall back to old API (no parent parameter - uses HEAD)
+                if parent and i > 0:
+                    # Set HEAD to parent before committing
+                    self.repo.refs[b'HEAD'] = parent
                 commit_id = self.repo.do_commit(
                     f"Commit {i}".encode(),
                     committer=b"Test User <test@example.com>",
-                    author=b"Test User <test@example.com>",
-                    parents=[parent] if parent else []
+                    author=b"Test User <test@example.com>"
                 )
             self.commits.append(commit_id)
             parent = commit_id
