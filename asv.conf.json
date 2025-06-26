@@ -9,6 +9,7 @@
     "environment_type": "virtualenv",
     "show_commit_url": "https://github.com/jelmer/dulwich/commit/",
     "pythons": ["3.13"],
+    "install_command": ["in-dir={env_dir} python -mpip install {wheel_file}"],
     "benchmark_dir": "benchmarks",
     "env_dir": ".asv/env",
     "results_dir": ".asv/results", 
