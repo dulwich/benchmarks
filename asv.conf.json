@@ -4,12 +4,11 @@
     "project_url": "https://github.com/jelmer/dulwich",
     "repo": "https://github.com/jelmer/dulwich.git",
     "install_command": ["in-dir={env_dir} python -mpip install {wheel_file}"],
-    "build_command": ["python -m build --wheel -o {build_cache_dir} {build_dir} || PURE=1 python -m build --wheel -o {build_cache_dir} {build_dir}"],
+    "build_command": ["python -m build --wheel -o {build_cache_dir} {build_dir}"],
     "branches": ["master"],
     "environment_type": "virtualenv",
     "show_commit_url": "https://github.com/jelmer/dulwich/commit/",
     "pythons": ["3.13"],
-    "install_command": ["in-dir={env_dir} python -mpip install {wheel_file}"],
     "benchmark_dir": "benchmarks",
     "env_dir": ".asv/env",
     "results_dir": ".asv/results", 
@@ -20,5 +19,8 @@
     "default_benchmark_timeout": 60,
     "build_cache_size": 10,
     "conda_channels": [],
-    "skip_existing_commits": true
+    "skip_existing_commits": true,
+    "environment_vars": {
+        "PURE": "1"
+    }
 }

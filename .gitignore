@@ -3,3 +3,6 @@
 __pycache__/
 .DS_Store
 benchmark_results.json
+benchmark-results/*.json
+dulwich/
+test_run_releases.py

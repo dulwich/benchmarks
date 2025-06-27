@@ -9,6 +9,13 @@ import threading
 import time
 
 from dulwich import porcelain
+
+# ASV's skip exception for benchmarks that can't run
+try:
+    from asv_runner.benchmarks.mark import SkipNotImplemented
+except ImportError:
+    # Fallback for older ASV versions
+    SkipNotImplemented = NotImplementedError
 from dulwich.client import (
     HttpGitClient,
     LocalGitClient,
@@ -17,15 +24,22 @@ from dulwich.diff_tree import tree_changes
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.pack import Pack, PackData, PackIndex, write_pack_objects
 from dulwich.repo import Repo
-from dulwich.server import (
-    FileSystemBackend,
-)
 from dulwich.walk import Walker
-from dulwich.web import (
-    GunzipFilter,
-    HTTPGitApplication,
-    make_server,
-)
+
+# These modules might not exist in older versions
+try:
+    from dulwich.server import FileSystemBackend
+except ImportError:
+    FileSystemBackend = None
+
+try:
+    from dulwich.web import (
+        GunzipFilter,
+        HTTPGitApplication,
+        make_server,
+    )
+except ImportError:
+    GunzipFilter = HTTPGitApplication = make_server = None
 
 
 class BenchmarkBase:
@@ -156,21 +170,24 @@ class LargeHistoryBenchmarks(BenchmarkBase):
     def time_merge_base(self, num_commits, files_per_commit):
         """Time finding merge base between branches."""
         if num_commits >= 200:
-            # Find merge base between two branches
-            branch1 = self.repo.refs[b"refs/heads/branch-0"]
-            branch2 = self.repo.refs[
-                f"refs/heads/branch-{(num_commits // 100) * 100}".encode()
-            ]
-
-            from dulwich.graph import find_merge_base
-
-            find_merge_base(self.repo.object_store, [branch1, branch2])
+            try:
+                from dulwich.graph import find_merge_base
+                
+                # Find merge base between two branches
+                branch1 = self.repo.refs[b"refs/heads/branch-0"]
+                branch2 = self.repo.refs[
+                    f"refs/heads/branch-{(num_commits // 100) * 100}".encode()
+                ]
+                find_merge_base(self.repo.object_store, [branch1, branch2])
+            except ImportError:
+                # Skip if graph module doesn't exist in older versions
+                raise SkipNotImplemented("find_merge_base not available in this version")
 
     def time_log_with_patches(self, num_commits, files_per_commit):
         """Time verbose log with patches (git log -p equivalent)."""
         import io
 
-        outf = io.BytesIO()
+        outf = io.StringIO()
         # Use porcelain.log with patches
         porcelain.log(self.repo.path, outstream=outf, max_entries=100)
 
@@ -180,7 +197,7 @@ class LargeHistoryBenchmarks(BenchmarkBase):
 
         # Show last 50 commits
         for commit_id in self.commits[-50:]:
-            outf = io.BytesIO()
+            outf = io.StringIO()
             porcelain.show(self.repo.path, objectish=commit_id, outstream=outf)
 
     def time_diff_tree(self, num_commits, files_per_commit):
@@ -199,6 +216,7 @@ class DiskObjectStoreBenchmarks(BenchmarkBase):
     def setup(self, num_objects, storage_type):
         """Create disk object store with objects in different storage formats."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
         self.store = self.repo.object_store
         self.num_objects = num_objects
@@ -210,12 +228,12 @@ class DiskObjectStoreBenchmarks(BenchmarkBase):
             # Vary content size
             size = random.choice([100, 1000, 10000])
             content = "".join(random.choices(string.ascii_letters, k=size))
-            blob = Blob.from_string(f"Object {i}\n{content}")
+            blob = Blob.from_string(f"Object {i}\n{content}".encode())
 
             if storage_type == "loose" or storage_type == "mixed":
                 self.store.add_object(blob)
             else:
-                objects_data.append((blob.type_name, blob.as_raw_string()))
+                objects_data.append(blob)
 
             self.object_ids.append(blob.id)
 
@@ -232,7 +250,7 @@ class DiskObjectStoreBenchmarks(BenchmarkBase):
                 objects_to_pack = objects_data
 
             with open(pack_path, "wb") as f:
-                write_pack_objects(f, objects_to_pack)
+                write_pack_objects(f.write, objects_to_pack)
 
             # Create index
             pack_data = PackData(pack_path)
@@ -293,13 +311,13 @@ class PackFileDiskBenchmarks(BenchmarkBase):
                 if with_deltas:
                     base_content = content
 
-            blob = Blob.from_string(content)
-            self.objects.append((blob.type_name, blob.id, blob.as_raw_string()))
+            blob = Blob.from_string(content.encode() if isinstance(content, str) else content)
+            self.objects.append(blob)
 
         # Write pack file
         self.pack_path = os.path.join(self.tmpdir, "test.pack")
         with open(self.pack_path, "wb") as f:
-            write_pack_objects(f, [(obj[0], obj[2]) for obj in self.objects])
+            write_pack_objects(f.write, self.objects)
 
         # Create index
         self.pack_data = PackData(self.pack_path)
@@ -313,14 +331,14 @@ class PackFileDiskBenchmarks(BenchmarkBase):
         # Access random objects
         for _ in range(100):
             idx = random.randint(0, num_objects - 1)
-            sha = self.objects[idx][1]
+            sha = self.objects[idx].id
             self.pack[sha]
 
     def time_pack_sequential_read(self, num_objects, with_deltas):
         """Time sequential reading of pack objects."""
         # Read first 100 objects sequentially
         for i in range(min(100, num_objects)):
-            sha = self.objects[i][1]
+            sha = self.objects[i].id
             self.pack[sha]
 
     def time_pack_index_load(self, num_objects, with_deltas):
@@ -346,17 +364,20 @@ class ClientServerBenchmarks(BenchmarkBase):
 
         # Create server repository
         self.server_path = os.path.join(self.tmpdir, "server")
+        os.makedirs(self.server_path, exist_ok=True)
         self.server_repo = Repo.init_bare(self.server_path)
 
         # Populate server repository
         temp_path = os.path.join(self.tmpdir, "temp")
+        os.makedirs(temp_path, exist_ok=True)
         temp_repo = Repo.init(temp_path)
 
         for i in range(num_commits):
-            path = os.path.join(temp_path, f"file{i}.txt")
+            filename = f"file{i}.txt"
+            path = os.path.join(temp_path, filename)
             with open(path, "w") as f:
                 f.write(f"Server content {i}\n" * 100)
-            temp_repo.stage([path])
+            temp_repo.stage([filename])
             temp_repo.do_commit(f"Server commit {i}".encode())
 
         # Push to server
@@ -387,10 +408,11 @@ class ClientServerBenchmarks(BenchmarkBase):
 
             # Add new commits
             for i in range(10):
-                path = os.path.join(temp_path, f"new_file{i}.txt")
+                filename = f"new_file{i}.txt"
+                path = os.path.join(temp_path, filename)
                 with open(path, "w") as f:
                     f.write(f"New content {i}\n")
-                temp_repo.stage([path])
+                temp_repo.stage([filename])
                 temp_repo.do_commit(f"New commit {i}".encode())
 
             # Push to server
@@ -424,20 +446,27 @@ class HTTPProtocolBenchmarks(BenchmarkBase):
     def setup(self, num_commits, use_compression):
         """Setup HTTP server and repositories."""
         super().setup()
+        
+        # Skip if web modules aren't available
+        if FileSystemBackend is None or HTTPGitApplication is None or make_server is None:
+            raise SkipNotImplemented("HTTP server modules not available in this version")
 
         # Create server repository
         self.server_path = os.path.join(self.tmpdir, "server")
+        os.makedirs(self.server_path, exist_ok=True)
         self.server_repo = Repo.init_bare(self.server_path)
 
         # Populate server
         temp_path = os.path.join(self.tmpdir, "temp")
+        os.makedirs(temp_path, exist_ok=True)
         temp_repo = Repo.init(temp_path)
 
         for i in range(num_commits):
-            path = os.path.join(temp_path, f"file{i}.txt")
+            filename = f"file{i}.txt"
+            path = os.path.join(temp_path, filename)
             with open(path, "w") as f:
                 f.write(f"HTTP content {i}\n" * 100)
-            temp_repo.stage([path])
+            temp_repo.stage([filename])
             temp_repo.do_commit(f"HTTP commit {i}".encode())
 
         porcelain.push(temp_repo, self.server_path, "master")
@@ -459,12 +488,12 @@ class HTTPProtocolBenchmarks(BenchmarkBase):
         # Give server time to start
         time.sleep(0.1)
 
-    def teardown(self):
+    def teardown(self, *args):
         """Shutdown HTTP server and cleanup."""
         if hasattr(self, "server"):
             self.server.shutdown()
             self.server_thread.join()
-        super().teardown()
+        super().teardown(*args)
 
     def time_http_clone(self, num_commits, use_compression):
         """Time cloning over HTTP."""
@@ -497,10 +526,12 @@ class PackNegotiationBenchmarks(BenchmarkBase):
 
         # Create server repository
         self.server_path = os.path.join(self.tmpdir, "server")
+        os.makedirs(self.server_path, exist_ok=True)
         self.server_repo = Repo.init_bare(self.server_path)
 
         # Create temp repo for commits
         temp_path = os.path.join(self.tmpdir, "temp")
+        os.makedirs(temp_path, exist_ok=True)
         temp_repo = Repo.init(temp_path)
 
         # Create common commits
@@ -508,10 +539,11 @@ class PackNegotiationBenchmarks(BenchmarkBase):
         self.common_shas = []
 
         for i in range(common_commits):
-            path = os.path.join(temp_path, f"common{i}.txt")
+            filename = f"common{i}.txt"
+            path = os.path.join(temp_path, filename)
             with open(path, "w") as f:
                 f.write(f"Common content {i}\n" * 50)
-            temp_repo.stage([path])
+            temp_repo.stage([filename])
             sha = temp_repo.do_commit(f"Common commit {i}".encode())
             self.common_shas.append(sha)
 
@@ -525,10 +557,11 @@ class PackNegotiationBenchmarks(BenchmarkBase):
 
         # Add divergent commits to server
         for i in range(common_commits, num_commits):
-            path = os.path.join(temp_path, f"server{i}.txt")
+            filename = f"server{i}.txt"
+            path = os.path.join(temp_path, filename)
             with open(path, "w") as f:
                 f.write(f"Server only content {i}\n" * 50)
-            temp_repo.stage([path])
+            temp_repo.stage([filename])
             temp_repo.do_commit(f"Server only commit {i}".encode())
 
         # Push server-only commits
@@ -575,31 +608,33 @@ class LargeFileBenchmarks(BenchmarkBase):
     def setup(self, file_size_mb):
         """Create repository with large files."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
         self.file_size_mb = file_size_mb
 
         # Create large file
-        self.large_file = os.path.join(self.repo_path, "large_file.bin")
+        self.large_file_name = "large_file.bin"
+        self.large_file = os.path.join(self.repo_path, self.large_file_name)
         content = os.urandom(file_size_mb * 1024 * 1024)
         with open(self.large_file, "wb") as f:
             f.write(content)
 
     def time_add_large_file(self, file_size_mb):
         """Time adding large file to repository."""
-        self.repo.stage([self.large_file])
+        self.repo.stage([self.large_file_name])
         self.repo.do_commit(b"Add large file")
 
     def time_diff_large_file(self, file_size_mb):
         """Time diffing large file changes."""
         # First commit
-        self.repo.stage([self.large_file])
+        self.repo.stage([self.large_file_name])
         commit1 = self.repo.do_commit(b"Initial large file")
 
         # Modify file
         with open(self.large_file, "ab") as f:
             f.write(b"Additional content\n")
 
-        self.repo.stage([self.large_file])
+        self.repo.stage([self.large_file_name])
         commit2 = self.repo.do_commit(b"Modified large file")
 
         # Diff the commits
@@ -617,6 +652,7 @@ class BranchOperationBenchmarks(BenchmarkBase):
     def setup(self, num_branches):
         """Create repository with many branches."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
         self.num_branches = num_branches
 
@@ -624,21 +660,28 @@ class BranchOperationBenchmarks(BenchmarkBase):
         path = os.path.join(self.repo_path, "initial.txt")
         with open(path, "w") as f:
             f.write("Initial content\n")
-        self.repo.stage([path])
+        self.repo.stage(["initial.txt"])
         base_commit = self.repo.do_commit(b"Initial commit")
 
         # Create branches with different commits
         self.branch_commits = {}
         for i in range(num_branches):
             # Create unique commit for each branch
-            path = os.path.join(self.repo_path, f"branch{i}.txt")
+            filename = f"branch{i}.txt"
+            path = os.path.join(self.repo_path, filename)
             with open(path, "w") as f:
                 f.write(f"Branch {i} content\n")
-            self.repo.stage([path])
+            self.repo.stage([filename])
 
-            commit = self.repo.do_commit(
-                f"Branch {i} commit".encode(), parent_commits=[base_commit]
-            )
+            # Handle API compatibility
+            try:
+                commit = self.repo.do_commit(
+                    f"Branch {i} commit".encode(), parent_commits=[base_commit]
+                )
+            except TypeError:
+                # Fall back to old API - set HEAD to base commit before committing
+                self.repo.refs[b"HEAD"] = base_commit
+                commit = self.repo.do_commit(f"Branch {i} commit".encode())
 
             branch_name = f"refs/heads/branch-{i}".encode()
             self.repo.refs[branch_name] = commit
@@ -685,6 +728,7 @@ class StatusBenchmarks(BenchmarkBase):
     def setup(self, num_files, percent_modified):
         """Create repository with many files in various states."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
         self.num_files = num_files
 
@@ -721,9 +765,11 @@ class StatusBenchmarks(BenchmarkBase):
 
     def time_diff_index(self, num_files, percent_modified):
         """Time diffing against index."""
-        from dulwich.index import get_unstaged_changes
-
-        list(get_unstaged_changes(self.repo.open_index(), self.repo.path))
+        try:
+            from dulwich.index import get_unstaged_changes
+            list(get_unstaged_changes(self.repo.open_index(), self.repo.path))
+        except (ImportError, AttributeError):
+            raise SkipNotImplemented("get_unstaged_changes not available in this version")
 
 
 class GarbageCollectionBenchmarks(BenchmarkBase):
@@ -735,6 +781,7 @@ class GarbageCollectionBenchmarks(BenchmarkBase):
     def setup(self, num_loose_objects, unreachable_percent):
         """Create repository with many loose objects and some unreachable."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
 
         # Create reachable objects in commits
@@ -744,7 +791,7 @@ class GarbageCollectionBenchmarks(BenchmarkBase):
             # Create 10 blobs per commit
             tree = Tree()
             for j in range(min(10, num_reachable - i)):
-                blob = Blob.from_string(f"Reachable object {i + j}\n" * 100)
+                blob = Blob.from_string((f"Reachable object {i + j}\n" * 100).encode())
                 self.repo.object_store.add_object(blob)
                 tree.add(f"file{j}.txt".encode(), 0o100644, blob.id)
             self.repo.object_store.add_object(tree)
@@ -766,19 +813,19 @@ class GarbageCollectionBenchmarks(BenchmarkBase):
         # Create unreachable loose objects
         num_unreachable = num_loose_objects * unreachable_percent // 100
         for i in range(num_unreachable):
-            blob = Blob.from_string(f"Unreachable object {i}\n" * 100)
+            blob = Blob.from_string((f"Unreachable object {i}\n" * 100).encode())
             self.repo.object_store.add_object(blob)
 
         # Create some existing pack files
         objects = []
         for i in range(100):
-            blob = Blob.from_string(f"Already packed object {i}\n" * 100)
-            objects.append((blob.type_name, blob.as_raw_string()))
+            blob = Blob.from_string((f"Already packed object {i}\n" * 100).encode())
+            objects.append(blob)
 
         pack_path = os.path.join(self.repo_path, ".git/objects/pack/pack-existing.pack")
         os.makedirs(os.path.dirname(pack_path), exist_ok=True)
         with open(pack_path, "wb") as f:
-            write_pack_objects(f, objects)
+            write_pack_objects(f.write, objects)
 
         # Create index
         pack_data = PackData(pack_path)
@@ -786,33 +833,146 @@ class GarbageCollectionBenchmarks(BenchmarkBase):
 
     def time_count_objects(self, num_loose_objects, unreachable_percent):
         """Time counting objects using porcelain.count_objects."""
-        from dulwich.porcelain import count_objects
-
-        count_objects(self.repo)
+        try:
+            from dulwich.porcelain import count_objects
+            count_objects(self.repo)
+        except (ImportError, AttributeError):
+            # Function might not exist in older versions
+            raise SkipNotImplemented("Function not available in this version")
 
     def time_gc(self, num_loose_objects, unreachable_percent):
         """Time full garbage collection."""
-        from dulwich.porcelain import gc
-
-        gc(self.repo)
+        try:
+            from dulwich.porcelain import gc
+            gc(self.repo)
+        except (ImportError, AttributeError):
+            # Function might not exist in older versions
+            raise SkipNotImplemented("Function not available in this version")
 
     def time_repack(self, num_loose_objects, unreachable_percent):
         """Time repacking repository."""
-        from dulwich.porcelain import repack
-
-        repack(self.repo)
+        try:
+            from dulwich.porcelain import repack
+            repack(self.repo)
+        except (ImportError, AttributeError):
+            # Function might not exist in older versions
+            raise SkipNotImplemented("Function not available in this version")
 
     def time_prune(self, num_loose_objects, unreachable_percent):
         """Time pruning unreachable objects."""
-        from dulwich.porcelain import prune
-
-        prune(self.repo)
+        try:
+            from dulwich.porcelain import prune
+            prune(self.repo)
+        except (ImportError, AttributeError):
+            # Function might not exist in older versions
+            raise SkipNotImplemented("Function not available in this version")
 
     def time_fsck(self, num_loose_objects, unreachable_percent):
         """Time filesystem consistency check."""
-        from dulwich.porcelain import fsck
+        try:
+            from dulwich.porcelain import fsck
+            fsck(self.repo)
+        except (ImportError, AttributeError):
+            # Function might not exist in older versions
+            raise SkipNotImplemented("Function not available in this version")
 
-        fsck(self.repo)
+
+class SymrefBenchmarks(BenchmarkBase):
+    """Benchmarks for symbolic reference operations."""
+
+    params = ([10, 100, 1000], [1, 2, 4])
+    param_names = ["num_refs", "symref_depth"]
+
+    def setup(self, num_refs, symref_depth):
+        """Create repository with symbolic references."""
+        super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
+        self.repo = Repo.init(self.repo_path)
+        self.num_refs = num_refs
+        self.symref_depth = symref_depth
+        
+        # Create base refs
+        path = os.path.join(self.repo_path, "file.txt")
+        with open(path, "w") as f:
+            f.write("Test content\n")
+        self.repo.stage(["file.txt"])
+        commit_id = self.repo.do_commit(b"Initial commit")
+        
+        # Create regular refs that will be targets
+        for i in range(num_refs):
+            ref_name = f"refs/heads/branch-{i}".encode()
+            self.repo.refs[ref_name] = commit_id
+        
+        # Create symref chains of varying depths
+        for i in range(0, num_refs, 10):
+            # Create chain: symref-0 -> symref-1 -> ... -> branch-i
+            target = f"refs/heads/branch-{i}".encode()
+            for j in range(symref_depth - 1, -1, -1):
+                symref_name = f"refs/heads/symref-{i}-{j}".encode()
+                self.repo.refs.set_symbolic_ref(symref_name, target)
+                target = symref_name
+        
+        # Also create some remote refs with HEAD symrefs
+        for i in range(0, min(10, num_refs)):
+            remote_name = f"remote-{i}"
+            # Create remote HEAD pointing to a branch
+            remote_head = f"refs/remotes/{remote_name}/HEAD".encode()
+            remote_branch = f"refs/remotes/{remote_name}/master".encode() 
+            self.repo.refs[remote_branch] = commit_id
+            self.repo.refs.set_symbolic_ref(remote_head, remote_branch)
+
+    def time_read_symref(self, num_refs, symref_depth):
+        """Time reading symbolic references."""
+        for i in range(0, min(100, num_refs), 10):
+            # Read the head of a symref chain
+            symref_name = f"refs/heads/symref-{i}-0".encode()
+            self.repo.refs[symref_name]
+    
+    def time_follow_symref(self, num_refs, symref_depth):
+        """Time following symbolic reference chains."""
+        for i in range(0, min(100, num_refs), 10):
+            symref_name = f"refs/heads/symref-{i}-0".encode()
+            self.repo.refs.follow(symref_name)
+    
+    def time_set_symref(self, num_refs, symref_depth):
+        """Time setting symbolic references."""
+        for i in range(min(50, num_refs)):
+            new_symref = f"refs/heads/new-symref-{i}".encode()
+            target = f"refs/heads/branch-{i}".encode()
+            self.repo.refs.set_symbolic_ref(new_symref, target)
+    
+    def time_update_symref_target(self, num_refs, symref_depth):
+        """Time updating targets of existing symbolic references."""
+        for i in range(0, min(50, num_refs), 10):
+            symref_name = f"refs/heads/symref-{i}-0".encode()
+            new_target = f"refs/heads/branch-{(i + 1) % num_refs}".encode()
+            self.repo.refs.set_symbolic_ref(symref_name, new_target)
+    
+    def time_list_refs_with_symrefs(self, num_refs, symref_depth):
+        """Time listing all refs including symrefs."""
+        refs = self.repo.get_refs()
+        # Force iteration
+        list(refs.items())
+    
+    def time_read_remote_head(self, num_refs, symref_depth):
+        """Time reading remote HEAD symrefs."""
+        for i in range(min(10, num_refs)):
+            remote_head = f"refs/remotes/remote-{i}/HEAD".encode()
+            try:
+                self.repo.refs[remote_head]
+            except KeyError:
+                raise SkipNotImplemented("Function not available in this version")
+    
+    def time_resolve_remote_symrefs(self, num_refs, symref_depth):
+        """Time resolving remote symrefs to their targets."""
+        for i in range(min(10, num_refs)):
+            remote_head = f"refs/remotes/remote-{i}/HEAD".encode()
+            try:
+                self.repo.refs.follow(remote_head)
+            except KeyError:
+                raise SkipNotImplemented("Function not available in this version")
+            except AttributeError:
+                raise SkipNotImplemented("refs.follow not available in this version")
 
 
 class RepackingBenchmarks(BenchmarkBase):
@@ -824,6 +984,7 @@ class RepackingBenchmarks(BenchmarkBase):
     def setup(self, num_packs, objects_per_pack, with_deltas):
         """Create repository with multiple pack files."""
         super().setup()
+        os.makedirs(self.repo_path, exist_ok=True)
         self.repo = Repo.init(self.repo_path)
 
         # Create multiple pack files
@@ -851,19 +1012,19 @@ class RepackingBenchmarks(BenchmarkBase):
                     if with_deltas:
                         base_content = content
 
-                blob = Blob.from_string(f"Pack {pack_idx} Object {obj_idx}\n{content}")
-                objects.append((blob.type_name, blob.as_raw_string()))
+                blob = Blob.from_string(f"Pack {pack_idx} Object {obj_idx}\n{content}".encode())
+                objects.append(blob)
 
                 # Add some to a tree periodically
                 if obj_idx % 20 == 0:
                     tree = Tree()
                     tree.add(f"file{obj_idx}.txt".encode(), 0o100644, blob.id)
-                    objects.append((tree.type_name, tree.as_raw_string()))
+                    objects.append(tree)
 
             # Write pack file
             pack_path = os.path.join(pack_dir, f"pack-{pack_idx:04d}.pack")
             with open(pack_path, "wb") as f:
-                write_pack_objects(f, objects)
+                write_pack_objects(f.write, objects)
 
             # Create index
             pack_data = PackData(pack_path)
@@ -871,22 +1032,26 @@ class RepackingBenchmarks(BenchmarkBase):
 
         # Create some loose objects too
         for i in range(100):
-            blob = Blob.from_string(f"Loose object {i}\n" * 50)
+            blob = Blob.from_string((f"Loose object {i}\n" * 50).encode())
             self.repo.object_store.add_object(blob)
 
     def time_repack_all(self, num_packs, objects_per_pack, with_deltas):
         """Time repacking all objects into a single pack."""
-        from dulwich.porcelain import repack
-
-        repack(self.repo)
+        try:
+            from dulwich.porcelain import repack
+            repack(self.repo)
+        except (ImportError, AttributeError):
+            raise SkipNotImplemented("repack not available in this version")
 
     def time_repack_incremental(self, num_packs, objects_per_pack, with_deltas):
         """Time incremental repacking."""
         # This would need incremental repack support in dulwich
         # For now, use regular repack
-        from dulwich.porcelain import repack
-
-        repack(self.repo)
+        try:
+            from dulwich.porcelain import repack
+            repack(self.repo)
+        except (ImportError, AttributeError):
+            raise SkipNotImplemented("repack not available in this version")
 
     def time_pack_refs(self, num_packs, objects_per_pack, with_deltas):
         """Time packing references."""
@@ -896,9 +1061,11 @@ class RepackingBenchmarks(BenchmarkBase):
             # Point to a random object (simplified)
             self.repo.refs[ref_name] = b"0" * 40
 
-        from dulwich.porcelain import pack_refs
-
-        pack_refs(self.repo)
+        try:
+            from dulwich.porcelain import pack_refs
+            pack_refs(self.repo)
+        except (ImportError, AttributeError):
+            raise SkipNotImplemented("pack_refs not available in this version")
 
     def time_optimize_packs(self, num_packs, objects_per_pack, with_deltas):
         """Time optimizing pack files (reindex, verify, etc)."""

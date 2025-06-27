@@ -161,6 +161,19 @@ Parameters:
 - `objects_per_pack`: 100, 1000, 5000
 - `with_deltas`: False, True
 
+### 12. Symbolic Reference Operations (`SymrefBenchmarks`)
+- Reading symbolic references
+- Following symref chains
+- Setting new symrefs
+- Updating symref targets
+- Listing all refs including symrefs
+- Reading remote HEAD symrefs
+- Resolving remote symrefs
+
+Parameters:
+- `num_refs`: 10, 100, 1000
+- `symref_depth`: 1, 2, 4
+
 ## Benchmark Development
 
 To add new benchmarks:
