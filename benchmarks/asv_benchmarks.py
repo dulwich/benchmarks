@@ -401,6 +401,7 @@ class ClientServerBenchmarks(BenchmarkBase):
         if operation == "fetch":
             # Add new commits to server
             temp_path = os.path.join(self.tmpdir, "temp2")
+            os.makedirs(temp_path, exist_ok=True)
             temp_repo = Repo.init(temp_path)
 
             # Clone first to get existing content
@@ -427,10 +428,11 @@ class ClientServerBenchmarks(BenchmarkBase):
         if operation == "push":
             # Add commits to client
             for i in range(10):
-                path = os.path.join(self.client_path, f"client_file{i}.txt")
+                filename = f"client_file{i}.txt"
+                path = os.path.join(self.client_path, filename)
                 with open(path, "w") as f:
                     f.write(f"Client content {i}\n")
-                self.client_repo.stage([path])
+                self.client_repo.stage([filename])
                 self.client_repo.do_commit(f"Client commit {i}".encode())
 
             # Push to server
